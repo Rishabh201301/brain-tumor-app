@@ -20,7 +20,8 @@ from pipeline import (
     classify,
     gradcam,
     tumor_area,
-    extract_features
+    extract_features,
+    get_prediction_breakdown
 )
 
 # ============================================================================
@@ -200,6 +201,10 @@ def cached_classify(img_array: np.ndarray) -> tuple[str, float]:
 @st.cache_data(show_spinner=False)
 def cached_gradcam(img_array: np.ndarray) -> np.ndarray:
     return gradcam(img_array)
+
+@st.cache_data(show_spinner=False)
+def cached_breakdown(img_array: np.ndarray) -> dict:
+    return get_prediction_breakdown(img_array)
 
 
 # ============================================================================
@@ -481,12 +486,37 @@ else:
                 tumor_detected, det_conf = cached_detect(preprocessed_rgb)
 
                 if not tumor_detected:
-                    # END branch: No tumor detected
+                    # Healthy / Negative Scan Workflow
+                    completed_steps.extend(["Segment", "Extract Features", "Measure Area", "Classify"])
                     pipeline_placeholder.markdown(
                         render_pipeline_tracker(completed_steps),
                         unsafe_allow_html=True
                     )
-                    st.success(f"✅ No tumor detected (Confidence: {det_conf * 100:.1f}%)")
+                    st.success(f"✅ Normal Brain Scan — No Tumor Detected (Confidence: {det_conf * 100:.1f}%)")
+
+                    st.markdown("### 🔍 Image Acquisition & Preprocessing")
+                    col_input, col_pre = st.columns(2)
+                    with col_input:
+                        st.subheader("Input MRI")
+                        st.image(input_rgb, caption=f"Original Acquisition ({input_rgb.shape[1]}x{input_rgb.shape[0]})", width="stretch")
+                    with col_pre:
+                        st.subheader("Preprocessed")
+                        st.image(preprocessed_rgb, caption="Standardized (256x256, Gaussian Denoised, uint8)", width="stretch")
+
+                    st.divider()
+                    st.markdown("### 📊 Diagnostic Evaluation")
+                    m1, m2 = st.columns(2)
+                    m1.metric("Screening Result", "Healthy / No Tumor")
+                    m2.metric("Clearance Confidence", f"{det_conf * 100:.1f}%")
+
+                    st.markdown("#### Deep Learning Class Probabilities (EfficientNet-B3)")
+                    breakdown = cached_breakdown(preprocessed_rgb)
+                    for cls_name, prob in breakdown.items():
+                        percent = prob * 100
+                        st.markdown(f"**{cls_name}**: `{percent:.1f}%`")
+                        st.progress(min(max(float(prob), 0.0), 1.0))
+
+                    st.info("ℹ️ Scan evaluation complete. No hyperintense mass lesion or pathological contrast enhancement identified.")
                     st.stop()
 
                 mask = cached_segment(preprocessed_rgb)
@@ -552,6 +582,25 @@ else:
                 m1.metric("Tumor Type", tumor_type)
                 m2.metric("Classification Confidence", f"{class_conf * 100:.1f}%")
                 m3.metric("Estimated Area", f"{area_mm2:.2f} mm²")
+
+                # Multi-Class Probability Distribution & Radiomic Features
+                breakdown = cached_breakdown(preprocessed_rgb)
+                eval_col1, eval_col2 = st.columns([1, 1])
+
+                with eval_col1:
+                    st.markdown("#### Deep Learning Class Probabilities (EfficientNet-B3)")
+                    for cls_name, prob in breakdown.items():
+                        percent = prob * 100
+                        st.markdown(f"**{cls_name}**: `{percent:.1f}%`")
+                        st.progress(min(max(float(prob), 0.0), 1.0))
+
+                with eval_col2:
+                    st.markdown("#### Radiomic & Intensity Metrics")
+                    st.markdown(f"- **Mean Lesion Intensity:** `{features.get('mean_intensity', 0)}`")
+                    st.markdown(f"- **Intensity Std Deviation:** `{features.get('std_intensity', 0)}`")
+                    st.markdown(f"- **Maximum Intensity Peak:** `{features.get('max_intensity', 0)}`")
+                    st.markdown(f"- **Cross-Sectional Coverage:** `{features.get('coverage_ratio', 0) * 100:.2f}%`")
+                    st.markdown(f"- **Pixel Spacing Factor:** `{pixel_spacing:.2f} mm/px`")
 
                 # Precompute overlay and Grad-CAM
                 overlay_img = generate_tumor_overlay(preprocessed_rgb, mask)

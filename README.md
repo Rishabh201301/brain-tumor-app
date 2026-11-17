@@ -65,9 +65,11 @@ brain-tumor-app/
 ├── assets/
 │   ├── abes_logo.png        # Institution logo placeholder
 │   └── sample_mri.png       # Sample test MRI scan for verification
+├── models/
+│   └── efficientnetb3.onnx  # Pre-trained 4-class Deep Learning model (ONNX Runtime)
 ├── .venv/                   # Python virtual environment (ignored in git)
 ├── app.py                   # Streamlit interactive medical dashboard UI
-├── pipeline.py              # Backend processing, segmentation, classification, and Grad-CAM
+├── pipeline.py              # Backend inference, segmentation, classification, and Grad-CAM
 ├── requirements.txt         # Core dependencies
 └── README.md                # Comprehensive documentation
 ```
