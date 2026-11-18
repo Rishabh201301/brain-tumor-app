@@ -15,6 +15,8 @@ from pipeline import (
     load_image,
     get_image_metadata,
     preprocess,
+    crop_to_head,
+    check_scan_validity,
     analyze,
     detect,
     segment,
@@ -26,6 +28,19 @@ from pipeline import (
     extract_features,
     get_prediction_breakdown
 )
+
+# ============================================================================
+# 0. Global Limitations & Academic Disclaimers (Defined at Module Level)
+# ============================================================================
+_LIMITATIONS_TEXT = """
+- Trained on a public Kaggle dataset (Figshare + SARTAJ + Br35H); may not generalise to other scanners or sequences.
+- Possible patient-level leakage in the original train/test split; reported accuracy may be optimistic.
+- Closed-set classifier: only Glioma, Meningioma, Pituitary, No Tumor. Other lesions (abscess, metastasis, etc.) will be misclassified.
+- Full-head, skull-included or post-contrast scans are out-of-distribution; results may be unreliable.
+- A "No Tumor" output does NOT rule out pathology.
+- Area is a 2D slice estimate; pixel spacing is an assumption unless DICOM metadata is used.
+- Not a medical device. For research and education only.
+"""
 
 # ============================================================================
 # 1. Page Configuration & Custom Medical Dashboard Theme
@@ -503,15 +518,25 @@ else:
                 tumor_prob = result["tumor_prob"]
                 tumor_detected = top_class != "No Tumor"
 
+                # Check scan validity (OOD / full-head check)
+                is_valid_scan, validity_reason = check_scan_validity(preprocessed_rgb)
+
                 if not tumor_detected:
-                    # Healthy / Negative Scan Workflow
+                    # Negative Scan Workflow
                     det_conf = probs["No Tumor"]
                     completed_steps.extend(["Classify", "Segment", "Extract Features", "Measure Area"])
                     pipeline_placeholder.markdown(
                         render_pipeline_tracker(completed_steps),
                         unsafe_allow_html=True
                     )
-                    st.success(f"✅ Normal Brain Scan — No Tumor Detected (Confidence: {det_conf * 100:.1f}%)")
+
+                    # Check for out-of-distribution / full-head false-negative risk
+                    if not is_valid_scan:
+                        st.error("⚠️ Unsupported scan type / out of distribution")
+                        st.warning(f"Scan distribution alert: {validity_reason}")
+                        st.markdown("> **False Negative Risk:** The model predicted 'No Tumor', but this scan contains significant non-brain borders, facial structures, or whole-head features that were not present in the Kaggle training distribution. Radiologist review required.")
+                    else:
+                        st.info(f"ℹ️ No tumor detected by this model on this slice. This does not rule out pathology. (Model Confidence: {det_conf * 100:.1f}%)")
 
                     if is_uncertain:
                         st.warning("⚠️ Low confidence / possible out-of-distribution scan. Radiologist review recommended.")
@@ -523,12 +548,12 @@ else:
                         st.image(input_rgb, caption=f"Original Acquisition ({input_rgb.shape[1]}x{input_rgb.shape[0]})", width="stretch")
                     with col_pre:
                         st.subheader("Preprocessed")
-                        st.image(preprocessed_rgb, caption="Standardized (256×256, Head-Cropped, uint8)", width="stretch")
+                        st.image(preprocessed_rgb, caption=f"Standardized (256×256, Head-Cropped from {input_rgb.shape[1]}x{input_rgb.shape[0]}, uint8)", width="stretch")
 
                     st.divider()
                     st.markdown("### 📊 Diagnostic Evaluation")
                     m1, m2 = st.columns(2)
-                    m1.metric("Screening Result", "Healthy / No Tumor")
+                    m1.metric("Screening Result", "Unsupported / OOD" if not is_valid_scan else "No Tumor on Slice")
                     m2.metric("Clearance Confidence", f"{det_conf * 100:.1f}%")
 
                     st.markdown("#### Deep Learning Class Probabilities (EfficientNet-B3)")
@@ -537,7 +562,11 @@ else:
                         st.markdown(f"**{cls_name}**: `{percent:.1f}%`")
                         st.progress(min(max(float(prob), 0.0), 1.0))
 
-                    st.info("ℹ️ Scan evaluation complete. No hyperintense mass lesion or pathological contrast enhancement identified.")
+                    st.markdown("#### Scan Quality & Validity Check")
+                    if is_valid_scan:
+                        st.success(f"✓ Scan Validity: {validity_reason}")
+                    else:
+                        st.error(f"✗ Scan Validity: {validity_reason}")
 
                     # Limitations expander
                     with st.expander("⚠️ Known Limitations", expanded=False):
@@ -725,18 +754,3 @@ else:
             except Exception as e:
                 st.warning(f"⚠️ Error processing uploaded MRI scan: {e}")
 
-
-# ============================================================================
-# Shared limitations text (used in expander + report)
-# ============================================================================
-_LIMITATIONS_TEXT = """
-- **Segmentation is heuristic** — intensity thresholding constrained within a brain mask, NOT a trained U-Net.
-  Ring-enhancing lesions with a dark core will be partially missed.
-- **Heatmap is a surrogate** — a Gaussian blob at the segmentation centroid, NOT a true Grad-CAM or Eigen-CAM.
-  It is not class-specific. Real gradient-based explainability requires the original Keras model or a dual-output ONNX export.
-- **Possible dataset shortcuts** — the training dataset (Kaggle brain tumor MRI) may contain patient-level data leakage
-  and imaging shortcuts. Domain shift is expected on out-of-distribution scanners.
-- **Area is from a single 2D slice** — not volumetric. Displayed in px² unless calibrated DICOM pixel spacing is provided.
-- **Not a medical device** — this tool is a decision-support aid for academic purposes only. Final diagnosis must rest with
-  a qualified radiologist/neurosurgeon.
-"""

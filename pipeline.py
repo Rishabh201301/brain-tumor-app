@@ -30,6 +30,16 @@ TEMPERATURE = 1.0          # tune on a validation set (NLL-minimise)
 CONF_THRESHOLD = 0.80      # top-class probability below this ⇒ uncertain
 ENTROPY_MAX = 0.90          # entropy above this ⇒ uncertain
 
+_LIMITATIONS_TEXT = """
+- Trained on a public Kaggle dataset (Figshare + SARTAJ + Br35H); may not generalise to other scanners or sequences.
+- Possible patient-level leakage in the original train/test split; reported accuracy may be optimistic.
+- Closed-set classifier: only Glioma, Meningioma, Pituitary, No Tumor. Other lesions (abscess, metastasis, etc.) will be misclassified.
+- Full-head, skull-included or post-contrast scans are out-of-distribution; results may be unreliable.
+- A "No Tumor" output does NOT rule out pathology.
+- Area is a 2D slice estimate; pixel spacing is an assumption unless DICOM metadata is used.
+- Not a medical device. For research and education only.
+"""
+
 
 def get_model_session():
     """
@@ -179,18 +189,61 @@ def get_image_metadata(image: Union[Image.Image, np.ndarray]) -> Dict[str, Any]:
 def crop_to_head(rgb: np.ndarray, margin: int = 8) -> np.ndarray:
     """
     Crop the image tightly around the brain/head region, discarding excess
-    black background.  This replicates the tight-crop commonly seen in
+    black background. This replicates the tight-crop commonly seen in
     Kaggle brain-tumor datasets.
     """
+    orig_shape = rgb.shape[:2]
     gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
     _, th = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     cnts, _ = cv2.findContours(th, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not cnts:
+        print(f"[PREPROCESS] crop_to_head: no foreground contour found; shape unchanged {orig_shape}")
         return rgb
     x, y, w, h = cv2.boundingRect(max(cnts, key=cv2.contourArea))
     H, W = rgb.shape[:2]
-    return rgb[max(y - margin, 0):min(y + h + margin, H),
-               max(x - margin, 0):min(x + w + margin, W)]
+    cropped = rgb[max(y - margin, 0):min(y + h + margin, H),
+                  max(x - margin, 0):min(x + w + margin, W)]
+    print(f"[PREPROCESS] crop_to_head applied: before={orig_shape} -> after={cropped.shape[:2]}")
+    return cropped
+
+
+def check_scan_validity(img: np.ndarray) -> Tuple[bool, str]:
+    """
+    Check if the preprocessed MRI scan conforms to the expected distribution
+    (isolated brain slice similar to Kaggle training distribution).
+    Detects full-head scans with large non-brain borders, facial structures,
+    or eyes/skull prominence.
+
+    Returns:
+        (is_valid: bool, reason: str)
+    """
+    gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY) if img.ndim == 3 else img.copy()
+    fg = gray > 20
+    fg_count = int(np.count_nonzero(fg))
+    if fg_count < 2000:
+        return False, "Insufficient signal or blank image."
+
+    bm = brain_mask(gray) > 0
+    bm_count = int(np.count_nonzero(bm))
+
+    # Brain parenchyma coverage relative to foreground tissue
+    brain_ratio = bm_count / max(fg_count, 1)
+
+    # Peripheral border check: outer 10% perimeter
+    h, w = gray.shape[:2]
+    border_mask = np.ones((h, w), dtype=bool)
+    pad_y, pad_x = max(int(h * 0.10), 1), max(int(w * 0.10), 1)
+    border_mask[pad_y:h-pad_y, pad_x:w-pad_x] = False
+    border_fg = int(np.count_nonzero(fg & border_mask))
+    border_ratio = border_fg / max(int(np.count_nonzero(border_mask)), 1)
+
+    if brain_ratio < 0.50:
+        return False, f"Large non-brain tissue detected (brain parenchyma is only {brain_ratio*100:.1f}% of tissue; eyes/skull/face visible). Scan is out-of-distribution."
+
+    if border_ratio > 0.40 and brain_ratio < 0.65:
+        return False, f"Large non-brain border detected (outer perimeter tissue {border_ratio*100:.1f}%). Expected tightly cropped intracranial brain slice."
+
+    return True, "Valid intracranial slice."
 
 
 # ============================================================================
