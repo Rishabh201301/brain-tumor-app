@@ -15,10 +15,13 @@ from pipeline import (
     load_image,
     get_image_metadata,
     preprocess,
+    analyze,
     detect,
     segment,
+    segmentation_ok,
     classify,
-    gradcam,
+    surrogate_heatmap,
+    gradcam,          # alias kept for backward compat
     tumor_area,
     extract_features,
     get_prediction_breakdown
@@ -183,8 +186,8 @@ def cached_preprocess(img_array: np.ndarray) -> np.ndarray:
     return preprocess(img_array)
 
 @st.cache_data(show_spinner=False)
-def cached_detect(img_array: np.ndarray) -> tuple[bool, float]:
-    return detect(img_array)
+def cached_analyze(img_array: np.ndarray) -> dict:
+    return analyze(img_array)
 
 @st.cache_data(show_spinner=False)
 def cached_segment(img_array: np.ndarray) -> np.ndarray:
@@ -195,16 +198,8 @@ def cached_extract_features(img_array: np.ndarray, mask: np.ndarray) -> dict:
     return extract_features(img_array, mask)
 
 @st.cache_data(show_spinner=False)
-def cached_classify(img_array: np.ndarray) -> tuple[str, float]:
-    return classify(img_array)
-
-@st.cache_data(show_spinner=False)
-def cached_gradcam(img_array: np.ndarray) -> np.ndarray:
-    return gradcam(img_array)
-
-@st.cache_data(show_spinner=False)
-def cached_breakdown(img_array: np.ndarray) -> dict:
-    return get_prediction_breakdown(img_array)
+def cached_heatmap(img_array: np.ndarray) -> np.ndarray:
+    return surrogate_heatmap(img_array)
 
 
 # ============================================================================
@@ -235,64 +230,82 @@ def generate_tumor_overlay(base_img: np.ndarray, mask: np.ndarray, alpha: float 
 def generate_report_png(
     input_img: np.ndarray,
     overlay_img: np.ndarray,
-    gradcam_img: np.ndarray,
+    heatmap_img: np.ndarray,
     tumor_type: str,
     confidence: float,
-    area_mm2: float,
+    area_info: dict,
     pixel_spacing: float,
-    filename: str
+    filename: str,
+    seg_reliable: bool = True,
+    uncertain: bool = False
 ) -> bytes:
     """
     Generates a high-resolution clinical diagnostic summary report exportable as PNG.
     """
-    fig = plt.figure(figsize=(13, 8), facecolor="#FFFFFF", dpi=160)
+    fig = plt.figure(figsize=(13, 9.5), facecolor="#FFFFFF", dpi=160)
     
     # 1. Header Banner
-    fig.text(0.06, 0.94, "BRAIN TUMOR MRI DIAGNOSTIC REPORT", fontsize=18, fontweight="bold", color="#1F2A44", fontfamily="serif")
-    fig.text(0.06, 0.90, "ABES Engineering College • Dept. of CSE • Session 2026-27 | Mini Project (BCS554)", fontsize=11, color="#556B82", fontfamily="serif")
-    fig.text(0.06, 0.86, f"Target Scan: {filename}   |   Pixel Spacing: {pixel_spacing:.2f} mm   |   Date: {datetime.now().strftime('%Y-%m-%d %H:%M')}", fontsize=9.5, color="#7B8A9E")
+    fig.text(0.06, 0.95, "BRAIN TUMOR MRI DIAGNOSTIC REPORT", fontsize=18, fontweight="bold", color="#1F2A44", fontfamily="serif")
+    fig.text(0.06, 0.92, "ABES Engineering College • Dept. of CSE • Session 2026-27 | Mini Project (BCS554)", fontsize=11, color="#556B82", fontfamily="serif")
+    fig.text(0.06, 0.89, f"Target Scan: {filename}   |   Pixel Spacing: {pixel_spacing:.2f} mm   |   Date: {datetime.now().strftime('%Y-%m-%d %H:%M')}", fontsize=9.5, color="#7B8A9E")
     
     # Dividing line
-    line = plt.Line2D([0.06, 0.94], [0.84, 0.84], transform=fig.transFigure, color="#E2D9CF", linewidth=1.5)
+    line = plt.Line2D([0.06, 0.94], [0.87, 0.87], transform=fig.transFigure, color="#E2D9CF", linewidth=1.5)
     fig.add_artist(line)
 
     # 2. Three Image Panels
-    ax1 = fig.add_axes([0.06, 0.42, 0.27, 0.38])
+    ax1 = fig.add_axes([0.06, 0.48, 0.27, 0.35])
     ax1.imshow(input_img)
     ax1.set_title("1. Input MRI Scan", fontsize=12, fontweight="bold", color="#1F2A44", pad=8)
     ax1.axis("off")
 
-    ax2 = fig.add_axes([0.365, 0.42, 0.27, 0.38])
+    ax2 = fig.add_axes([0.365, 0.48, 0.27, 0.35])
     ax2.imshow(overlay_img)
     ax2.set_title("2. Segmented Tumor (Red Overlay)", fontsize=12, fontweight="bold", color="#B91C1C", pad=8)
     ax2.axis("off")
 
-    ax3 = fig.add_axes([0.67, 0.42, 0.27, 0.38])
-    ax3.imshow(gradcam_img)
-    ax3.set_title("3. Grad-CAM Activation Heatmap", fontsize=12, fontweight="bold", color="#1F2A44", pad=8)
+    ax3 = fig.add_axes([0.67, 0.48, 0.27, 0.35])
+    ax3.imshow(heatmap_img)
+    ax3.set_title("3. Surrogate Activation Heatmap", fontsize=12, fontweight="bold", color="#1F2A44", pad=8)
     ax3.axis("off")
 
     # 3. Diagnostic Summary Card
-    rect = plt.Rectangle((0.06, 0.12), 0.88, 0.24, transform=fig.transFigure,
+    rect = plt.Rectangle((0.06, 0.20), 0.88, 0.24, transform=fig.transFigure,
                          facecolor="#FBF3EA", edgecolor="#E2D9CF", linewidth=1.5, clip_on=False)
     fig.add_artist(rect)
 
-    fig.text(0.09, 0.31, "CLINICAL FINDINGS & QUANTITATIVE ANALYSIS", fontsize=12, fontweight="bold", color="#1F2A44", fontfamily="serif")
+    fig.text(0.09, 0.39, "CLINICAL FINDINGS & QUANTITATIVE ANALYSIS", fontsize=12, fontweight="bold", color="#1F2A44", fontfamily="serif")
     
     col_x1, col_x2, col_x3 = 0.09, 0.39, 0.69
-    fig.text(col_x1, 0.25, "Condition / Status:", fontsize=10, color="#64748B")
-    fig.text(col_x1, 0.21, "TUMOR DETECTED", fontsize=13, fontweight="bold", color="#B91C1C")
+    fig.text(col_x1, 0.33, "Condition / Status:", fontsize=10, color="#64748B")
+    status_text = "TUMOR DETECTED (UNCERTAIN)" if uncertain else "TUMOR DETECTED"
+    fig.text(col_x1, 0.29, status_text, fontsize=13, fontweight="bold", color="#B91C1C")
     
-    fig.text(col_x2, 0.25, "Classified Subtype:", fontsize=10, color="#64748B")
-    fig.text(col_x2, 0.21, f"{tumor_type} ({confidence*100:.1f}% conf.)", fontsize=13, fontweight="bold", color="#1F2A44")
+    fig.text(col_x2, 0.33, "Classified Subtype:", fontsize=10, color="#64748B")
+    fig.text(col_x2, 0.29, f"{tumor_type} ({confidence*100:.1f}% conf.)", fontsize=13, fontweight="bold", color="#1F2A44")
 
-    fig.text(col_x3, 0.25, "Estimated Tumor Area:", fontsize=10, color="#64748B")
-    fig.text(col_x3, 0.21, f"{area_mm2:.2f} mm²", fontsize=13, fontweight="bold", color="#1F2A44")
+    fig.text(col_x3, 0.33, "Cross-Sectional Area (this slice):", fontsize=10, color="#64748B")
+    if seg_reliable:
+        fig.text(col_x3, 0.29, f"{area_info['area_value']:.2f} {area_info['unit']}", fontsize=13, fontweight="bold", color="#1F2A44")
+    else:
+        fig.text(col_x3, 0.29, "Segmentation unreliable", fontsize=13, fontweight="bold", color="#94A3B8")
 
-    fig.text(0.09, 0.15, "Notice: Decision-support aid only. Final diagnosis rests with a qualified medical doctor.",
+    fig.text(0.09, 0.23, "Notice: Decision-support aid only. Final diagnosis rests with a qualified medical doctor.",
              fontsize=9, fontstyle="italic", color="#64748B")
-             
-    fig.text(0.06, 0.04, "Department of Computer Science & Engineering • ABES Engineering College, Ghaziabad", fontsize=9, color="#94A3B8")
+
+    # 4. Limitations Section
+    lim_rect = plt.Rectangle((0.06, 0.03), 0.88, 0.14, transform=fig.transFigure,
+                              facecolor="#FFF8F0", edgecolor="#E2D9CF", linewidth=1.0, clip_on=False)
+    fig.add_artist(lim_rect)
+    fig.text(0.09, 0.14, "⚠️ KNOWN LIMITATIONS", fontsize=10, fontweight="bold", color="#B45309", fontfamily="serif")
+    limitations = [
+        "• Segmentation is heuristic (intensity thresholding, NOT a trained U-Net). Ring-enhancing lesions may be partially missed.",
+        "• Heatmap is a surrogate (Gaussian blob at segmentation centroid), NOT a true Grad-CAM or Eigen-CAM.",
+        "• Training dataset may contain patient-level leakage and shortcut features (domain shift risk on unseen scanners).",
+        "• Area measurement is from a single 2D slice — not volumetric. Uncalibrated unless DICOM pixel spacing is provided.",
+    ]
+    for i, lim in enumerate(limitations):
+        fig.text(0.09, 0.11 - i * 0.025, lim, fontsize=7.5, color="#78716C")
 
     buf = io.BytesIO()
     plt.savefig(buf, format="png", dpi=160, facecolor=fig.get_facecolor(), edgecolor="none")
@@ -305,10 +318,10 @@ def generate_report_png(
 PIPELINE_STEPS = [
     "Input MRI",
     "Preprocess",
+    "Classify",
     "Segment",
     "Extract Features",
     "Measure Area",
-    "Classify"
 ]
 
 def render_pipeline_tracker(completed_steps: list, active_step: str = None) -> str:
@@ -386,13 +399,13 @@ with st.sidebar:
         value=1.0,
         step=0.1,
         format="%.2f",
-        help="In-plane spatial resolution for MRI slice"
+        help="In-plane spatial resolution for MRI slice (from DICOM metadata)"
     )
 
-    show_gradcam = st.checkbox(
-        "Show Grad-CAM",
+    show_heatmap = st.checkbox(
+        "Show Activation Heatmap",
         value=True,
-        help="Generate Gradient-weighted Class Activation Mapping for visual interpretability"
+        help="Generate a surrogate activation heatmap centred on the segmentation region"
     )
 
     analyze_btn = st.button("Analyze", type="primary", use_container_width=True)
@@ -447,7 +460,7 @@ else:
                 st.markdown(f"- **Filename:** `{uploaded_file.name}`")
                 st.markdown(f"- **Dimensions:** `{meta['dimensions']}`")
                 st.markdown(f"- **Pixel Spacing:** `{pixel_spacing:.2f} mm`")
-                st.markdown(f"- **Grad-CAM Enabled:** `{'Yes' if show_gradcam else 'No'}`")
+                st.markdown(f"- **Heatmap Enabled:** `{'Yes' if show_heatmap else 'No'}`")
                 st.info("👆 Click **Analyze** in the sidebar to run the detection pipeline.")
         else:
             st.warning("⚠️ Could not load the uploaded file. Please verify it is a valid image.")
@@ -478,21 +491,30 @@ else:
                 preprocessed_rgb = cached_preprocess(input_rgb)
                 completed_steps.append("Preprocess")
 
-                # Step 3: Segment & Detect
+                # Step 3: Classify (single inference via analyze())
                 pipeline_placeholder.markdown(
-                    render_pipeline_tracker(completed_steps, active_step="Segment"),
+                    render_pipeline_tracker(completed_steps, active_step="Classify"),
                     unsafe_allow_html=True
                 )
-                tumor_detected, det_conf = cached_detect(preprocessed_rgb)
+                result = cached_analyze(preprocessed_rgb)
+                probs = result["probs"]
+                top_class = result["top"]
+                is_uncertain = result["uncertain"]
+                tumor_prob = result["tumor_prob"]
+                tumor_detected = top_class != "No Tumor"
 
                 if not tumor_detected:
                     # Healthy / Negative Scan Workflow
-                    completed_steps.extend(["Segment", "Extract Features", "Measure Area", "Classify"])
+                    det_conf = probs["No Tumor"]
+                    completed_steps.extend(["Classify", "Segment", "Extract Features", "Measure Area"])
                     pipeline_placeholder.markdown(
                         render_pipeline_tracker(completed_steps),
                         unsafe_allow_html=True
                     )
                     st.success(f"✅ Normal Brain Scan — No Tumor Detected (Confidence: {det_conf * 100:.1f}%)")
+
+                    if is_uncertain:
+                        st.warning("⚠️ Low confidence / possible out-of-distribution scan. Radiologist review recommended.")
 
                     st.markdown("### 🔍 Image Acquisition & Preprocessing")
                     col_input, col_pre = st.columns(2)
@@ -501,7 +523,7 @@ else:
                         st.image(input_rgb, caption=f"Original Acquisition ({input_rgb.shape[1]}x{input_rgb.shape[0]})", width="stretch")
                     with col_pre:
                         st.subheader("Preprocessed")
-                        st.image(preprocessed_rgb, caption="Standardized (256x256, Gaussian Denoised, uint8)", width="stretch")
+                        st.image(preprocessed_rgb, caption="Standardized (256×256, Head-Cropped, uint8)", width="stretch")
 
                     st.divider()
                     st.markdown("### 📊 Diagnostic Evaluation")
@@ -510,19 +532,34 @@ else:
                     m2.metric("Clearance Confidence", f"{det_conf * 100:.1f}%")
 
                     st.markdown("#### Deep Learning Class Probabilities (EfficientNet-B3)")
-                    breakdown = cached_breakdown(preprocessed_rgb)
-                    for cls_name, prob in breakdown.items():
+                    for cls_name, prob in probs.items():
                         percent = prob * 100
                         st.markdown(f"**{cls_name}**: `{percent:.1f}%`")
                         st.progress(min(max(float(prob), 0.0), 1.0))
 
                     st.info("ℹ️ Scan evaluation complete. No hyperintense mass lesion or pathological contrast enhancement identified.")
+
+                    # Limitations expander
+                    with st.expander("⚠️ Known Limitations", expanded=False):
+                        st.markdown(_LIMITATIONS_TEXT)
+
                     st.stop()
 
+                # --- Tumor detected path ---
+                tumor_type = top_class
+                class_conf = probs[top_class]
+                completed_steps.append("Classify")
+
+                # Step 4: Segment
+                pipeline_placeholder.markdown(
+                    render_pipeline_tracker(completed_steps, active_step="Segment"),
+                    unsafe_allow_html=True
+                )
                 mask = cached_segment(preprocessed_rgb)
+                seg_reliable = segmentation_ok(mask)
                 completed_steps.append("Segment")
 
-                # Step 4: Extract Features
+                # Step 5: Extract Features
                 pipeline_placeholder.markdown(
                     render_pipeline_tracker(completed_steps, active_step="Extract Features"),
                     unsafe_allow_html=True
@@ -530,21 +567,13 @@ else:
                 features = cached_extract_features(preprocessed_rgb, mask)
                 completed_steps.append("Extract Features")
 
-                # Step 5: Measure Area
+                # Step 6: Measure Area
                 pipeline_placeholder.markdown(
                     render_pipeline_tracker(completed_steps, active_step="Measure Area"),
                     unsafe_allow_html=True
                 )
-                area_mm2 = tumor_area(mask, px_spacing_mm=pixel_spacing)
+                area_info = tumor_area(mask, px_spacing_mm=pixel_spacing)
                 completed_steps.append("Measure Area")
-
-                # Step 6: Classify
-                pipeline_placeholder.markdown(
-                    render_pipeline_tracker(completed_steps, active_step="Classify"),
-                    unsafe_allow_html=True
-                )
-                tumor_type, class_conf = cached_classify(preprocessed_rgb)
-                completed_steps.append("Classify")
 
                 # Render all completed steps ticked
                 pipeline_placeholder.markdown(
@@ -552,8 +581,12 @@ else:
                     unsafe_allow_html=True
                 )
 
+                # Uncertainty banner
+                if is_uncertain:
+                    st.warning("⚠️ Low confidence / possible out-of-distribution scan. Radiologist review required.")
+                
                 # Detection Alert Banner
-                st.error(f"⚠️ Tumor detected (Confidence: {det_conf * 100:.1f}%)")
+                st.error(f"⚠️ Tumor detected — {tumor_type} ({class_conf * 100:.1f}% conf.)")
 
                 # 2. Acquisition & Preprocessed Columns
                 st.markdown("### 🔍 Image Acquisition & Preprocessing")
@@ -570,7 +603,7 @@ else:
                     st.subheader("Preprocessed")
                     st.image(
                         preprocessed_rgb,
-                        caption="Standardized (256x256, Gaussian Denoised, uint8)",
+                        caption="Standardized (256×256, Head-Cropped, uint8)",
                         width="stretch"
                     )
 
@@ -581,30 +614,42 @@ else:
                 m1, m2, m3 = st.columns(3)
                 m1.metric("Tumor Type", tumor_type)
                 m2.metric("Classification Confidence", f"{class_conf * 100:.1f}%")
-                m3.metric("Estimated Area", f"{area_mm2:.2f} mm²")
+
+                # Area: honest labelling
+                if seg_reliable:
+                    m3.metric(
+                        "Cross-Sectional Area (this slice)",
+                        f"{area_info['area_value']:.2f} {area_info['unit']}"
+                    )
+                else:
+                    m3.metric("Cross-Sectional Area (this slice)", "Segmentation unreliable")
 
                 # Multi-Class Probability Distribution & Radiomic Features
-                breakdown = cached_breakdown(preprocessed_rgb)
                 eval_col1, eval_col2 = st.columns([1, 1])
 
                 with eval_col1:
                     st.markdown("#### Deep Learning Class Probabilities (EfficientNet-B3)")
-                    for cls_name, prob in breakdown.items():
+                    for cls_name, prob in probs.items():
                         percent = prob * 100
                         st.markdown(f"**{cls_name}**: `{percent:.1f}%`")
                         st.progress(min(max(float(prob), 0.0), 1.0))
 
                 with eval_col2:
                     st.markdown("#### Radiomic & Intensity Metrics")
-                    st.markdown(f"- **Mean Lesion Intensity:** `{features.get('mean_intensity', 0)}`")
-                    st.markdown(f"- **Intensity Std Deviation:** `{features.get('std_intensity', 0)}`")
-                    st.markdown(f"- **Maximum Intensity Peak:** `{features.get('max_intensity', 0)}`")
-                    st.markdown(f"- **Cross-Sectional Coverage:** `{features.get('coverage_ratio', 0) * 100:.2f}%`")
-                    st.markdown(f"- **Pixel Spacing Factor:** `{pixel_spacing:.2f} mm/px`")
+                    if seg_reliable:
+                        st.markdown(f"- **Mean Lesion Intensity:** `{features.get('mean_intensity', 0)}`")
+                        st.markdown(f"- **Intensity Std Deviation:** `{features.get('std_intensity', 0)}`")
+                        st.markdown(f"- **Maximum Intensity Peak:** `{features.get('max_intensity', 0)}`")
+                        st.markdown(f"- **Cross-Sectional Coverage:** `{features.get('coverage_ratio', 0) * 100:.2f}%`")
+                        st.markdown(f"- **Pixel Spacing Factor:** `{pixel_spacing:.2f} mm/px`")
+                    else:
+                        st.warning("Segmentation mask failed sanity check — radiomic metrics may be unreliable.")
+                        st.markdown(f"- **Mean Lesion Intensity:** `{features.get('mean_intensity', 0)}`")
+                        st.markdown(f"- **Pixel Spacing Factor:** `{pixel_spacing:.2f} mm/px`")
 
-                # Precompute overlay and Grad-CAM
+                # Precompute overlay and heatmap
                 overlay_img = generate_tumor_overlay(preprocessed_rgb, mask)
-                gradcam_img = cached_gradcam(preprocessed_rgb)
+                heatmap_img = cached_heatmap(preprocessed_rgb)
 
                 st.divider()
 
@@ -612,8 +657,8 @@ else:
                 st.markdown("### 🔬 Visualization & Interpretability")
 
                 tab_titles = ["Segmentation", "Overlay"]
-                if show_gradcam:
-                    tab_titles.append("Grad-CAM")
+                if show_heatmap:
+                    tab_titles.append("Activation Heatmap (Surrogate)")
 
                 tabs = st.tabs(tab_titles)
 
@@ -621,10 +666,12 @@ else:
                     st.markdown("**Binary Segmentation Mask** (0 = Background, 1 = Tumor Tissue)")
                     st.image(
                         mask * 255,
-                        caption="Segmented Tumor Region (Morphological Otsu Mask)",
+                        caption="Segmented Tumor Region (Brain-Mask Constrained Thresholding)",
                         clamp=True,
                         width="stretch"
                     )
+                    if not seg_reliable:
+                        st.warning("⚠️ Segmentation mask failed sanity check (too small or too large). Results should be interpreted with caution.")
 
                 with tabs[1]:
                     st.markdown("**Tumor Region Overlay** (Red Highlight on Preprocessed MRI)")
@@ -634,28 +681,37 @@ else:
                         width="stretch"
                     )
 
-                if show_gradcam:
+                if show_heatmap:
                     with tabs[2]:
-                        st.markdown("**Class Activation Map (Grad-CAM)**")
+                        st.markdown("**Segmentation-Centroid Heatmap (Surrogate)**")
+                        st.caption("⚠️ This is NOT a true Grad-CAM. It is a Gaussian blob placed at the segmentation centroid and is not class-specific.")
                         st.image(
-                            gradcam_img,
-                            caption="Salient Activation Heatmap (JET Colormap)",
+                            heatmap_img,
+                            caption="Surrogate Activation Heatmap — NOT class-specific (JET Colormap)",
                             width="stretch"
                         )
 
                 st.divider()
 
-                # 5. Export Diagnostic Report Button
+                # 5. Known Limitations (always shown)
+                with st.expander("⚠️ Known Limitations", expanded=False):
+                    st.markdown(_LIMITATIONS_TEXT)
+
+                st.divider()
+
+                # 6. Export Diagnostic Report Button
                 st.markdown("### 📄 Clinical Export")
                 report_bytes = generate_report_png(
                     input_img=input_rgb,
                     overlay_img=overlay_img,
-                    gradcam_img=gradcam_img,
+                    heatmap_img=heatmap_img,
                     tumor_type=tumor_type,
                     confidence=class_conf,
-                    area_mm2=area_mm2,
+                    area_info=area_info,
                     pixel_spacing=pixel_spacing,
-                    filename=uploaded_file.name
+                    filename=uploaded_file.name,
+                    seg_reliable=seg_reliable,
+                    uncertain=is_uncertain
                 )
 
                 st.download_button(
@@ -668,3 +724,19 @@ else:
 
             except Exception as e:
                 st.warning(f"⚠️ Error processing uploaded MRI scan: {e}")
+
+
+# ============================================================================
+# Shared limitations text (used in expander + report)
+# ============================================================================
+_LIMITATIONS_TEXT = """
+- **Segmentation is heuristic** — intensity thresholding constrained within a brain mask, NOT a trained U-Net.
+  Ring-enhancing lesions with a dark core will be partially missed.
+- **Heatmap is a surrogate** — a Gaussian blob at the segmentation centroid, NOT a true Grad-CAM or Eigen-CAM.
+  It is not class-specific. Real gradient-based explainability requires the original Keras model or a dual-output ONNX export.
+- **Possible dataset shortcuts** — the training dataset (Kaggle brain tumor MRI) may contain patient-level data leakage
+  and imaging shortcuts. Domain shift is expected on out-of-distribution scanners.
+- **Area is from a single 2D slice** — not volumetric. Displayed in px² unless calibrated DICOM pixel spacing is provided.
+- **Not a medical device** — this tool is a decision-support aid for academic purposes only. Final diagnosis must rest with
+  a qualified radiologist/neurosurgeon.
+"""
